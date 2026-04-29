@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#000; font-family:Arial,sans-serif; }
+    
+    #video {
+      width:100vw; height:65vh;
+      object-fit:cover; display:block;
+    }
+    
+    /* กรอบเล็ง */
+    #aimBox {
+      position:fixed; top:0; left:0;
+      width:100vw; height:65vh;
+      pointer-events:none;
+    }
+    #aimBox::after {
+      content:'';
+      position:absolute;
+      top:50%; left:50%;
+      transform:translate(-50%,-55%);
+      width:200px; height:200px;
+      border:3px solid #00ff00;
+      border-radius:12px;
+      box-shadow: 0 0 0 2000px rgba(0,0,0,0.35);
+    }
+
+    #statusBar {
+      position:fixed; top:8px; left:0; right:0;
+      text-align:center; color:#fff;
+      font-size:13px; z-index:10;
+      text-shadow:0 1px 3px #000;
+    }
+
+    #resultBox {
+      height:35vh;
+      background:#fff;
+      overflow-y:auto;
+      padding:10px 12px;
+    }
+
+    #resultBox h4 {
+      font-size:14px; color:#555;
+      margin-bottom:8px;
+    }
+
+    #resultList { padding:0; margin:0; }
+    #resultList li {
+      list-style:none;
+      font-size:18px; font-weight:bold;
+      padding:12px 14px;
+      margin-bottom:8px;
+      border-radius:10px;
+      border:2px solid #007bff;
+      background:#f8fbff;
+      cursor:pointer;
+      word-break:break-all;
+      transition: background 0.15s;
+    }
+    #resultList li.selected {
+      background:#007bff;
+      color:#fff;
+    }
+
+    #btnBar {
+      position:fixed; bottom:0; left:0; right:0;
+      display:flex; gap:8px;
+      padding:10px 12px;
+      padding-bottom:max(10px, env(safe-area-inset-bottom));
+      background:#111;
+    }
+    #btnBar button {
+      flex:1; padding:16px;
+      font-size:17px; font-weight:bold;
+      border:none; border-radius:12px; cursor:pointer;
+    }
+    #btnConfirm { background:#28a745; color:#fff; }
+    #btnClose   { background:#dc3545; color:#fff; }
+    #btnClear   { background:#888; color:#fff; flex:0.5; }
+
+    #noResult {
+      display:none;
+      text-align:center; padding:20px;
+      color:#999; font-size:15px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="statusBar">🔍 กำลังสแกน...</div>
+<video id="video" playsinline autoplay muted></video>
+<div id="aimBox"></div>
+
+<div id="resultBox">
+  <h4>📦 บาร์โค้ดที่พบ — แตะเพื่อเลือก</h4>
+  <div id="noResult">ยังไม่พบบาร์โค้ด<br>ชี้กล้องไปที่บาร์โค้ด</div>
+  <ul id="resultList"></ul>
+</div>
+
+<div id="btnBar">
+  <button id="btnConfirm" onclick="confirmSelect()">✔ เพิ่ม</button>
+  <button id="btnClear"   onclick="clearList()">🗑</button>
+  <button id="btnClose"   onclick="sendClose()">❌ ปิด</button>
+</div>
+
+<script>
+  const params      = new URLSearchParams(location.search);
+  const targetInput = params.get('target') || 'serial';
+  const originUrl   = params.get('origin') || '*';
+
+  const video      = document.getElementById('video');
+  const statusBar  = document.getElementById('statusBar');
+  const resultList = document.getElementById('resultList');
+  const noResult   = document.getElementById('noResult');
+
+  const foundSet    = new Set();
+  const selectedSet = new Set();
+  let stream, animFrame, scanCount = 0;
+
+  // เปิดกล้อง
+  navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:  { ideal: 1280 },
+      height: { ideal: 720 }
+    },
+    audio: false
+  })
+  .then(s => {
+    stream = s;
+    video.srcObject = s;
+    return video.play();
+  })
+  .then(() => {
+    statusBar.textContent = '🔍 กำลังสแกน...';
+    noResult.style.display = 'block';
+    scanLoop();
+  })
+  .catch(err => {
+    statusBar.textContent = '❌ ' + err.message;
+    statusBar.style.color = '#ff4444';
+  });
+
+  const canvas = document.createElement('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  function scanLoop() {
+    animFrame = requestAnimationFrame(scanLoop);
+    if (video.readyState < 2) return;
+
+    // scan ทุก 3 frame เพื่อประหยัด CPU
+    scanCount++;
+    if (scanCount % 3 !== 0) return;
+
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+
+    const img  = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(img.data, img.width, img.height, {
+      inversionAttempts: 'dontInvert'
+    });
+
+    if (code && !foundSet.has(code.data)) {
+      foundSet.add(code.data);
+      addItem(code.data);
+    }
+  }
+
+  function addItem(val) {
+    noResult.style.display = 'none';
+    statusBar.textContent = `✅ พบ ${foundSet.size} รายการ`;
+
+    const li = document.createElement('li');
+    li.textContent = val;
+    li.onclick = () => {
+      if (selectedSet.has(val)) {
+        selectedSet.delete(val);
+        li.classList.remove('selected');
+      } else {
+        selectedSet.add(val);
+        li.classList.add('selected');
+      }
+      const n = selectedSet.size;
+      document.getElementById('btnConfirm').textContent =
+        n > 0 ? `✔ เพิ่ม (${n})` : '✔ เพิ่ม';
+    };
+    resultList.prepend(li);
+  }
+
+  function clearList() {
+    foundSet.clear();
+    selectedSet.clear();
+    resultList.innerHTML = '';
+    noResult.style.display = 'block';
+    statusBar.textContent = '🔍 กำลังสแกน...';
+    document.getElementById('btnConfirm').textContent = '✔ เพิ่ม';
+  }
+
+  function confirmSelect() {
+    const vals = Array.from(selectedSet);
+    if (!vals.length) {
+      // ถ้ายังไม่เลือก แต่มีรายการเดียว → เลือกอัตโนมัติ
+      if (foundSet.size === 1) {
+        vals.push(...foundSet);
+      } else {
+        alert('กรุณาแตะเลือกบาร์โค้ดก่อน');
+        return;
+      }
+    }
+    stopCamera();
+    sendResult(vals);
+  }
+
+  function sendClose() {
+    stopCamera();
+    // ปิด tab กลับ
+    window.close();
+    // กรณี window.close() ไม่ได้ผล (บางมือถือ) → กด back
+    history.back();
+  }
+
+  function sendResult(vals) {
+    const msg = { type: 'SCAN_RESULT', target: targetInput, values: vals };
+    // ส่งผ่าน postMessage กลับ opener
+    if (window.opener) {
+      window.opener.postMessage(msg, '*');
+      window.close();
+    } else {
+      // กรณีเปิดเป็น tab ใหม่บนมือถือ — ใช้ localStorage relay
+      localStorage.setItem('scanResult', JSON.stringify(msg));
+      window.close();
+      history.back();
+    }
+  }
+
+  function stopCamera() {
+    cancelAnimationFrame(animFrame);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  }
+</script>
+</body>
+</html>
