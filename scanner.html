@@ -125,6 +125,7 @@
   <button id="btnClose"   onclick="sendClose()">❌ ปิด</button>
 </div>
 
+<!-- แทนที่เฉพาะส่วน <script> ทั้งหมด -->
 <script>
   const params      = new URLSearchParams(location.search);
   const targetInput = params.get('target') || 'serial';
@@ -136,13 +137,12 @@
   const foundSet    = new Set();
   const selectedSet = new Set();
 
-  // ZXing hints — เปิดทุก format
   const hints = new Map();
-  const formats = [
-    ZXing.BarcodeFormat.QR_CODE,
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.CODE_128,
     ZXing.BarcodeFormat.CODE_39,
     ZXing.BarcodeFormat.CODE_93,
+    ZXing.BarcodeFormat.QR_CODE,
     ZXing.BarcodeFormat.EAN_13,
     ZXing.BarcodeFormat.EAN_8,
     ZXing.BarcodeFormat.UPC_A,
@@ -152,37 +152,81 @@
     ZXing.BarcodeFormat.PDF_417,
     ZXing.BarcodeFormat.AZTEC,
     ZXing.BarcodeFormat.CODABAR,
-  ];
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+  ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  hints.set(ZXing.DecodeHintType.CHARACTER_SET, 'UTF-8');
 
-  const codeReader = new ZXing.BrowserMultiFormatReader(hints, 300); // scan ทุก 300ms
+  // scan ถี่ขึ้น 150ms
+  const codeReader = new ZXing.BrowserMultiFormatReader(hints, 150);
 
-  codeReader.listVideoInputDevices().then(devices => {
+  let currentStream = null;
+
+  codeReader.listVideoInputDevices().then(async devices => {
     if (!devices.length) throw new Error('ไม่พบกล้อง');
 
-    // เลือกกล้องหลัง
     const back = devices.find(d =>
       /back|rear|environment/i.test(d.label)
     ) || devices[devices.length - 1];
 
-    return codeReader.decodeFromVideoDevice(
-      back.deviceId,
-      'video',
-      (result, err) => {
-        if (result) {
-          const val = result.getText();
-          const fmt = result.getBarcodeFormat();
-          const fmtName = ZXing.BarcodeFormat[fmt] || 'UNKNOWN';
+    // ✅ ขอ resolution สูงขึ้น + เปิด zoom ถ้ามี
+    const constraints = {
+      deviceId: { exact: back.deviceId },
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 },
+      focusMode: { ideal: 'continuous' },   // auto focus
+      zoom: { ideal: 2 }                    // zoom x2 ถ้า browser รองรับ
+    };
 
-          if (!foundSet.has(val)) {
-            foundSet.add(val);
-            addItem(val, fmtName);
-          }
-        }
-        // err ปกติจะ throw ทุก frame ที่ไม่เจอ → ignore
+    try {
+      // เปิด stream เองก่อนเพื่อ apply advanced constraints
+      currentStream = await navigator.mediaDevices.getUserMedia({
+        video: constraints, audio: false
+      });
+
+      const videoEl = document.getElementById('video');
+      videoEl.srcObject = currentStream;
+      await videoEl.play();
+
+      // apply zoom ผ่าน track settings (Android Chrome รองรับ)
+      const track = currentStream.getVideoTracks()[0];
+      const caps  = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.zoom) {
+        const zoomVal = Math.min(caps.zoom.max, caps.zoom.min * 2.5);
+        await track.applyConstraints({ advanced: [{ zoom: zoomVal }] });
       }
-    );
+      // เปิด torch ถ้ามี (ช่วยให้ชัดในที่มืด) - optional
+      // if (caps.torch) await track.applyConstraints({ advanced: [{ torch: true }] });
+
+      // ส่ง stream เข้า ZXing
+      const imgSrc = new ZXing.MediaStreamImageSource(videoEl);
+      const reader  = new ZXing.BrowserMultiFormatReader(hints, 150);
+
+      const scanInterval = setInterval(async () => {
+        try {
+          const result = await reader.decodeFromImageElement(videoEl)
+            .catch(() => null);
+          if (!result) return;
+          const val = result.getText();
+          const fmt = ZXing.BarcodeFormat[result.getBarcodeFormat()] || '?';
+          if (!foundSet.has(val)) { foundSet.add(val); addItem(val, fmt); }
+        } catch(_) {}
+      }, 150);
+
+      window._scanInterval = scanInterval;
+
+    } catch(e) {
+      // fallback: ใช้ ZXing เปิดกล้องเอง
+      return codeReader.decodeFromVideoDevice(
+        back.deviceId, 'video',
+        (result, err) => {
+          if (!result) return;
+          const val = result.getText();
+          const fmt = ZXing.BarcodeFormat[result.getBarcodeFormat()] || '?';
+          if (!foundSet.has(val)) { foundSet.add(val); addItem(val, fmt); }
+        }
+      );
+    }
+
   }).catch(err => {
     statusBar.textContent = '❌ ' + err.message;
     statusBar.style.color = '#ff4444';
@@ -193,21 +237,16 @@
     statusBar.textContent = `✅ พบ ${foundSet.size} รายการ`;
 
     const li = document.createElement('li');
-
     const badge = `<span style="font-size:11px;font-weight:normal;
       background:#eef;color:#339;padding:2px 6px;border-radius:6px;
       margin-left:6px;">${fmt}</span>`;
-
     li.innerHTML = val + badge;
     li._value = val;
-
     li.onclick = () => {
       if (selectedSet.has(val)) {
-        selectedSet.delete(val);
-        li.classList.remove('selected');
+        selectedSet.delete(val); li.classList.remove('selected');
       } else {
-        selectedSet.add(val);
-        li.classList.add('selected');
+        selectedSet.add(val); li.classList.add('selected');
       }
       const n = selectedSet.size;
       document.getElementById('btnConfirm').textContent =
@@ -217,8 +256,7 @@
   }
 
   function clearList() {
-    foundSet.clear();
-    selectedSet.clear();
+    foundSet.clear(); selectedSet.clear();
     resultList.innerHTML = '';
     noResult.style.display = 'block';
     statusBar.textContent = '🔍 กำลังสแกน...';
@@ -228,32 +266,31 @@
   function confirmSelect() {
     let vals = Array.from(selectedSet);
     if (!vals.length) {
-      if (foundSet.size === 1) {
-        vals = Array.from(foundSet);
-      } else {
-        alert('กรุณาแตะเลือกบาร์โค้ดก่อน');
-        return;
-      }
+      if (foundSet.size === 1) vals = Array.from(foundSet);
+      else { alert('กรุณาแตะเลือกบาร์โค้ดก่อน'); return; }
     }
     stopAndSend(vals);
   }
 
   function sendClose() {
+    stopAll();
+    window.close(); history.back();
+  }
+
+  function stopAll() {
+    clearInterval(window._scanInterval);
     codeReader.reset();
-    window.close();
-    history.back();
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
   }
 
   function stopAndSend(vals) {
-    codeReader.reset();
+    stopAll();
     const msg = { type: 'SCAN_RESULT', target: targetInput, values: vals };
     if (window.opener) {
-      window.opener.postMessage(msg, '*');
-      window.close();
+      window.opener.postMessage(msg, '*'); window.close();
     } else {
       localStorage.setItem('scanResult', JSON.stringify(msg));
-      window.close();
-      history.back();
+      window.close(); history.back();
     }
   }
 </script>
